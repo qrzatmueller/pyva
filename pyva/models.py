@@ -966,7 +966,56 @@ class TMmodel:
             # ix 0 is the index of the velcoity at the surface
             return tau #,1-np.abs(R**2) 
     
-
+    def transmission_allard2(self,omega,kx=0.,ID=1, fluids = (matC.Fluid(),matC.Fluid()), signal = True,plot = 0):
+        """
+        Calculate the transmission of TMM according to Allards method.
+        
+        Parameters
+        ----------
+        ID : int
+            ID for surface condition (can be an inner ID)
+        boundary_condition : str
+            at end of layers
+        signal : bool, optional
+            Switch for Signal (True) or array (False) output. The default is True.
+    
+                
+                
+        Returns
+        -------
+        Signal 
+            impedance at port one   
+        """
+        
+        
+        # Create reduced Allard matrix
+        D1,F = self.allard_matrix(omega, kx = kx, reduced=True, 
+                                  boundary_condition = 'equivalent_fluid',out_fluid=fluids[1])
+        V    = D1.solve(F) 
+                    
+        Z_s = 1./V.ydata[0,:] # = 1/V_3(A)
+        SIF_in = aR.HalfSpace(fluids[0])
+        Zin = np.real(SIF_in.radiation_impedance_wavenumber(omega,kx))
+              
+        R = (Z_s-Zin)/(Z_s+Zin)
+        #print(R)
+        T = (1+R)*V.ydata[-2,:] # = (1+R)*P(B)
+        # Validation plot if requestet
+        if plot > 0:
+            V[-2].plot(plot,marker='.',res = 'real')
+            V[-2].plot(plot,marker='>',res = 'imag')
+        
+        tau = np.abs(T)**2
+        
+        # xdata predifined by non-scalar element kx or omega
+        if signal:
+            _doftype = dof.DOFtype(typestr = 'transmission')
+            xdata_ = D1.xdata # turn single values into arrays
+            return mC.Signal(xdata_,tau,_doftype), T
+        else:
+            # ix 0 is the index of the velcoity at the surface
+            return tau, T #,1-np.abs(R**2) 
+ 
     def stiffness_matrix(self,omega,distances,ks,dA,Nstep = 10):
         """
         Calculate stiffness matrix of TMmodel
@@ -1211,6 +1260,51 @@ class TMmodel:
             return mC.Signal(xdata_,abs_,dof.DOF(ID,0,dof.DOFtype(typestr='general')))
         else:
             return abs_.flatten()
+        
+    def absorption2(self,omega,kx,in_fluid = matC.Fluid(),ID=1, boundary_condition = 'fixed', allard = False, signal = True,out_fluid = matC.Fluid()):
+        """
+        Calculates the surface absorption with specified end condition and input fluid
+
+        Parameters
+        ----------
+        omega : float
+            angular frequency
+        kx : ndarray of float
+            surface wavenumber.
+        in_fluid : fluid, optional
+            irradiating fluid. The default is matC.Fluid().
+        ID : int, optional
+            ID for surface condition (can be an inner ID). The default is 1.
+        boundary_condition : str or Signal, optional
+            boundary_condition. The default is 'fixed'.
+        signal : bool, optional
+            Switch for Signal (True) or array (False) output. The default is True.
+
+        Returns
+        -------
+        Signal
+            absorption coefficient    
+        """
+        
+        
+        SIF = aR.HalfSpace(in_fluid)
+        
+        Zin = SIF.radiation_impedance_wavenumber(omega,kx)
+
+        if allard:
+            Zsurf  = self.impedance_allard(omega, kx, ID, boundary_condition, out_fluid=out_fluid)
+        else:
+            Zsurf  = self.impedance(omega, kx, ID, boundary_condition)
+        
+        xdata_ = Zsurf.xdata # turn single values into arrays
+        
+        refl_ = (Zsurf.ydata-Zin)/(Zsurf.ydata+Zin)
+        abs_  = 1-np.abs(refl_)**2
+        
+        if signal:
+            return mC.Signal(xdata_,abs_,dof.DOF(ID,0,dof.DOFtype(typestr='general'))),  refl_.flatten(), Zsurf.ydata #added extra returns
+        else:
+            return abs_.flatten(), refl_.flatten(), Zsurf.ydata #added extra returns
    
     
     def absorption_diffuse(self,omega,theta_max = 78/180*np.pi,theta_step = np.pi/180,\
@@ -1269,7 +1363,71 @@ class TMmodel:
             return mC.Signal(xdata,abs_diffuse,dof.DOF(ID, 0, dof.DOFtype(typestr = 'general')))
         else:
             return abs_diffuse
+     
+    #= constructionPy.absorption_diffuse2(omega, theta_max = np.pi*(89/180),in_fluid=in_fluid, boundary_condition = boundary_condition,signal = False, allard=Allard, out_fluid=out_fluid)    
+    def absorption_diffuse2(self,omega,theta_max = 78/180*np.pi,theta_step = np.pi/180,\
+                           in_fluid = matC.Fluid(),ID=1,boundary_condition= 'fixed', allard = False, \
+                           signal = True,out_fluid = matC.Fluid()):
+        """
+        diffuse surface absorption with specified end condition and input fluid
+
+        Parameters
+        ----------
+        omega : ndarray or float
+            angular frequency
+        theta_max : float, optional
+            Maximum angle for diffuse field integeration. The default is 78/180*np.pi.
+        theta_step : float, optional
+            Angle step for diffuse field integeration. The default is np.pi/180.
+        in_fluid : fluid, optional
+            Fluid of sound field. The default is matC.Fluid().
+        ID : int, optional
+            ID of considered layer. The default is 1.
+        boundary_condition : str, optional
+            End condtion. The default is 'fixed'.
+        signal : bool
+            Switch for Signal output,  The default is True.
+        allard : bool
+            Switch for calculation method, The default is False
+
+        Returns
+        -------
+        Signal, ndarray
+            Absorption coefficient   
+    
+        """
         
+        # \todo convention for first layer is structure layer must be implemented
+        
+        omega_ = np.array(omega).flatten()
+        abs_diffuse = np.zeros((omega_.size,))
+        theta_ = np.linspace(0,theta_max,int(np.floor((theta_max+theta_step)/theta_step)))
+        absPerAngle = np.zeros((omega_.size, theta_.size))
+        complexReflectionPerAngle = np.zeros_like(absPerAngle,dtype=complex)
+        complexImpedancePerAngle = np.zeros_like(absPerAngle,dtype=complex)
+        for ix,om in enumerate(omega_):
+            
+            k  = np.real(in_fluid.wavenumber(om))
+            kx_    = np.sin(theta_)*k
+            abs_kxsignal, refl, Zsurf = self.absorption2(om,kx_,in_fluid,ID,boundary_condition,allard = allard,out_fluid = matC.Fluid())
+            abs_kx = abs_kxsignal.ydata
+            
+            #remove nans
+            abs_kx[np.isnan(abs_kx)] = 0.
+            absPerAngle[ix] = abs_kx #Ernesto
+            complexReflectionPerAngle[ix] = refl 
+            complexImpedancePerAngle[ix] = Zsurf 
+            denom = np.sin(theta_max)**2
+            abs_diffuse[ix] = 2*integrate.simpson(abs_kx*np.sin(theta_)*np.cos(theta_), theta_)/denom
+
+        if uf.isscalar(omega):
+            return abs_diffuse[0]
+        elif signal:
+            xdata = mC.DataAxis(omega_, typestr = 'angular frequency')
+            return mC.Signal(xdata,abs_diffuse,dof.DOF(ID, 0, dof.DOFtype(typestr = 'general')))
+        else:
+            return abs_diffuse, absPerAngle, complexReflectionPerAngle, complexImpedancePerAngle
+                #absDiffusePy, absPerAngle, complexReflectionPerAngle, complexImpedancePerAngle, Zin
     def transmission_coefficient(self,omega,kx,fluids = (matC.Fluid(),matC.Fluid()),ID=0,signal = True):
         """
         provides the acoustic transmission coefficient of TMmodel objects
@@ -1325,6 +1483,7 @@ class TMmodel:
             return mC.Signal(xdata,tau_,dof.DOF(ID,0,dof.DOFtype(typestr='transmission')))        
         else:
             return tau_
+        
         
     def transmission_diffuse(self,omega,theta_max = 78/180*np.pi,theta_step = np.pi/180,\
                                   fluids = (matC.Fluid(),matC.Fluid()),ID = 0,signal = True,
@@ -1382,7 +1541,67 @@ class TMmodel:
                 return mC.Signal(xdata,tau_diffuse,dof.DOF(ID, 0, dof.DOFtype(typestr = 'transmission')))
             else:
                 return tau_diffuse
-      
+            
+    def transmission_diffuse2(self,omega,theta_max = 78/180*np.pi,theta_step = np.pi/180,\
+                                  fluids = (matC.Fluid(),matC.Fluid()),ID = 0,signal = True,
+                                  allard = False):
+        """
+        
+
+        Parameters
+        ----------
+        omega : float
+            angular frequency.
+        plate : 2Dstructure
+            reference plate with applied trim.
+        theta_max : float, optional
+            maximum integration angle. The default is 78/180*np.pi.
+        theta_step : float, optional
+            integral sampling step size. The default is np.pi/180.
+        fluids : tuple of fluids, optional
+            vector of coupled fluids. The default is (matC.Fluid(),matC.Fluid()).
+        ID : int, optional
+            node ID for output Signal. The default is 0.
+        signal : bool, optional
+            Switch for Signal (True) or array (False) output. The default is True.
+
+        Returns
+        -------
+        ndarray of Signal
+            diffuse field transmission coefficient.
+
+        """
+                
+        omega_ = np.array(omega).flatten()
+        tau_diffuse = np.zeros((omega_.size,))
+        denom = np.sin(theta_max)**2
+
+        theta_ = np.linspace(0,theta_max,int(np.floor((theta_max+theta_step)/theta_step)))
+        tauPerAngle = np.zeros((omega_.size, theta_.size))    
+        Tnew = np.zeros((omega_.size, theta_.size),dtype = complex)
+        for ix,om in enumerate(omega_):
+            k  = np.real(fluids[0].wavenumber(om))
+            kx_    = np.sin(theta_)*k
+            if allard:
+                tau_kx, T = self.transmission_allard2(om,kx_,fluids) #ernesto changed
+                tau_kx = tau_kx.ydata
+            else:
+                tau_kx = self.transmission_coefficient(om,kx_,fluids).ydata
+            #remove nans
+            tau_kx[np.isnan(tau_kx)] = 0.
+            tauPerAngle[ix] = tau_kx
+            tau_diffuse[ix] = 2*integrate.simpson(tau_kx*np.sin(theta_)*np.cos(theta_), x=theta_)/denom
+            Tnew[ix] = T
+            #tau_diffuse[ix] = 2*integrate.trapezoid(tau_kx*np.sin(theta_)*np.cos(theta_), theta_)/denom
+
+        if uf.isscalar(omega):
+            return tau_diffuse[0]
+        else:
+            if signal:
+                xdata = mC.DataAxis(omega_, typestr = 'angular frequency')
+                return mC.Signal(xdata,tau_diffuse,dof.DOF(ID, 0, dof.DOFtype(typestr = 'transmission')))
+            else:
+                return tau_diffuse, tauPerAngle, Tnew
 class VAmodel(mC.DynamicMatrix):
     
     """
