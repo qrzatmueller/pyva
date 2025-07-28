@@ -1484,7 +1484,64 @@ class TMmodel:
         else:
             return tau_
         
+    def transmission_coefficient2(self,omega,kx,fluids = (matC.Fluid(),matC.Fluid()),ID=0,signal = True):
+        """
+        provides the acoustic transmission coefficient of TMmodel objects
         
+
+        Parameters
+        ----------
+        omega : TYPE
+            angular frequency.
+        kx : TYPE
+            surface wavenumber.
+        fluids : tuple of fluid, optional
+            2x1 vector of fluids. The default is (matC.Fluid(),matC.Fluid()).
+        ID : int, optional
+            node ID for output. The default is 0.
+
+        Returns
+        -------
+        Signal
+            transmission coefficient.
+
+        """
+        
+        if uf.isscalar(omega):
+            xdata  = self.kx_DataAxis(kx)
+        elif uf.isscalar(kx):
+            xdata  = mC.DataAxis(np.array(omega).flatten(),type = dof.DOFtype(typestr='angular frequency'))
+        elif ~(uf.isscalar(omega) or uf.isscalar(kx)):
+            if len(omega) == len(kx):
+                xdata = mC.DataAxis(np.array(omega).flatten(),type = dof.DOFtype(typestr='angular frequency'))
+            else:
+                raise(ValueError,'kx and omega must be one scalar or len(kx) == len(omega)')
+            
+        
+        
+        SIF_in  = aR.HalfSpace(fluids[0])
+        SIF_out = aR.HalfSpace(fluids[1])
+        
+        Z_in  = SIF_in.radiation_impedance_wavenumber(omega,kx)
+        Z_out = SIF_out.radiation_impedance_wavenumber(omega,kx)
+
+                
+        kx = np.array(kx).flatten() # turn single values into arrays
+        TM_ = self.connect(omega,kx)
+        T11 = TM_.data[0,0,:]
+        T12 = TM_.data[0,1,:]
+        T21 = TM_.data[1,0,:]
+        T22 = TM_.data[1,1,:]
+        
+        denom = T11 + T12 / Z_out + T21 * Z_in + T22 * Z_in / Z_out
+        T = 2 / denom
+        tau_ = np.abs(T)**2 * np.real(Z_in) / np.real(Z_out)
+        #tau_  = 4*np.real(1/Z_out)/np.real(1/Z_in)/np.abs(T11+T12/Z_out+T21*Z_in+T22*Z_in/Z_out)**2
+        #check = tau_ - tau
+        if signal:
+            return mC.Signal(xdata,tau_,dof.DOF(ID,0,dof.DOFtype(typestr='transmission'))), T        
+        else:
+            return tau_, T       
     def transmission_diffuse(self,omega,theta_max = 78/180*np.pi,theta_step = np.pi/180,\
                                   fluids = (matC.Fluid(),matC.Fluid()),ID = 0,signal = True,
                                   allard = False):
@@ -1586,7 +1643,8 @@ class TMmodel:
                 tau_kx, T = self.transmission_allard2(om,kx_,fluids) #ernesto changed
                 tau_kx = tau_kx.ydata
             else:
-                tau_kx = self.transmission_coefficient(om,kx_,fluids).ydata
+                tau_kx, T = self.transmission_coefficient2(om,kx_,fluids)
+                tau_kx = tau_kx.ydata
             #remove nans
             tau_kx[np.isnan(tau_kx)] = 0.
             tauPerAngle[ix] = tau_kx
